@@ -1,4 +1,4 @@
-# 🔒 Lokal Deşifre İstasyonu
+# 🔒 Local Transcription Station
 
 **A fully offline, privacy-first transcription and anonymization platform for qualitative research.**
 
@@ -16,7 +16,7 @@ Built for a psychology academic who needed to transcribe and anonymize clinical 
 
 Academic and clinical researchers routinely record interviews containing sensitive personal information — names, locations, medical details. Commercial transcription APIs (Whisper API, AssemblyAI, Otter.ai, etc.) require uploading that audio to a third party, which is frequently disallowed by ethics-committee approvals and data-protection regulations (GDPR, and in this case Turkey's KVKK).
 
-**Lokal Deşifre İstasyonu** solves this by running the entire pipeline — speech-to-text, speaker diarization, and PII redaction — on a single local machine, using only free, open-source models. The only network calls it ever makes are one-time model downloads from Hugging Face on first run; after that, it is provably offline.
+**Local Transcription Station** solves this by running the entire pipeline — speech-to-text, speaker diarization, and PII redaction — on a single local machine, using only free, open-source models. The only network calls it ever makes are one-time model downloads from Hugging Face on first run; after that, it is provably offline.
 
 ## Key Features
 
