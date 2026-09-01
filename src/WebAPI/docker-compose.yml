@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: psikoloji-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: psikoloji
+      POSTGRES_USER: psikoloji
+      POSTGRES_PASSWORD: CHANGE_ME
+    ports:
+      # DİKKAT: sadece 127.0.0.1'e bind ediliyor -- ağdaki başka bir
+      # makineden bu porta erişilemez. KVKK/Etik Kurul gereği verinin
+      # tamamen izole kalması bu satıra bağlı, "5432:5432" YAZMA.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - psikoloji_pgdata:/var/lib/postgresql/data
+
+volumes:
+  psikoloji_pgdata:
