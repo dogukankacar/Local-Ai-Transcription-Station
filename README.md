@@ -1,4 +1,4 @@
-# 🔒 Lokal Deşifre İstasyonu
+# 🔒 Local Transcription Station
 
 **A fully offline, privacy-first transcription and anonymization platform for qualitative research.**
 
