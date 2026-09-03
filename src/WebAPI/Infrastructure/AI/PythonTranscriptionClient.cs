@@ -19,6 +19,7 @@ public sealed class PythonTranscriptionClient : ITranscriptionEngineClient
     }
 
     public async Task<TranscriptionResult> TranscribeAsync(
+        Guid jobId,
         string audioFilePath,
         string language,
         IReadOnlyCollection<string> censorLabels,
@@ -27,6 +28,7 @@ public sealed class PythonTranscriptionClient : ITranscriptionEngineClient
     {
         var requestBody = new TranscribeRequestDto
         {
+            JobId = jobId.ToString(),
             AudioPath = audioFilePath,
             Language = language,
             CensorLabels = censorLabels.ToList(),
@@ -84,6 +86,9 @@ public sealed class PythonTranscriptionClient : ITranscriptionEngineClient
 
     private sealed class TranscribeRequestDto
     {
+        [JsonPropertyName("job_id")]
+        public string JobId { get; init; } = string.Empty;
+
         [JsonPropertyName("audio_path")]
         public string AudioPath { get; init; } = string.Empty;
 

@@ -1,4 +1,3 @@
-using Hangfire;
 using MediatR;
 using Psikoloji.Application.Common.Interfaces;
 using Psikoloji.Domain.Entities;
@@ -11,12 +10,12 @@ public sealed class EnqueueVideoInterviewJobCommandHandler
     private static readonly string[] DefaultCensorLabels = { "PER", "LOC" };
 
     private readonly IApplicationDbContext _db;
-    private readonly IBackgroundJobClient _backgroundJobClient;
+    private readonly IBackgroundJobQueue _queue;
 
-    public EnqueueVideoInterviewJobCommandHandler(IApplicationDbContext db, IBackgroundJobClient backgroundJobClient)
+    public EnqueueVideoInterviewJobCommandHandler(IApplicationDbContext db, IBackgroundJobQueue queue)
     {
         _db = db;
-        _backgroundJobClient = backgroundJobClient;
+        _queue = queue;
     }
 
     public async Task<Guid> Handle(EnqueueVideoInterviewJobCommand request, CancellationToken cancellationToken)
@@ -26,6 +25,7 @@ public sealed class EnqueueVideoInterviewJobCommandHandler
         var job = new TranscriptionJob
         {
             VideoFilePath = request.VideoFilePath,
+            OriginalFileName = request.OriginalFileName,
             Language = request.Language,
             CensorLabelsCsv = string.Join(',', labels),
             Diarization = request.Diarization,
@@ -34,13 +34,10 @@ public sealed class EnqueueVideoInterviewJobCommandHandler
         _db.TranscriptionJobs.Add(job);
         await _db.SaveChangesAsync(cancellationToken);
 
-        // Job DB'ye yazıldıktan SONRA Hangfire'a gönderiliyor -- Hangfire
-        // job'ı Postgres'teki kendi tablosuna kalıcı olarak yazar, yani
-        // API/PC yeniden başlasa bile bu job kaybolmaz ve otomatik devam eder.
-        _backgroundJobClient.Enqueue<ITranscriptionJobRunner>(
-            runner => runner.RunAsync(job.Id, CancellationToken.None));
+        // Job DB'ye yazıldıktan SONRA kuyruğa ekleniyor -- worker jobId'yi
+        // aldığında kaydın veritabanında zaten mevcut olduğundan emin olmak için.
+        await _queue.EnqueueAsync(job.Id, cancellationToken);
 
         return job.Id;
     }
 }
-

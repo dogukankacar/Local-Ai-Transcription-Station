@@ -42,7 +42,32 @@ from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-logging.basicConfig(level=logging.INFO)
+
+def _resolve_log_file_path() -> Path:
+    """
+    .exe'nin (paketlenmiş haldeyken) ya da bu .py dosyasının (geliştirme
+    modundayken) yanına bir 'logs' klasörü açıp oraya yazar. Konsol
+    penceresi KAPALI (console=False) paketlendiğinde stderr/stdout hiç
+    yok -- eski haliyle (StreamHandler) log yazmaya çalışmak burada
+    ÇÖKMEYE yol açardı. Dosyaya yazmak hem bu çökmeyi önlüyor hem de
+    konsol penceresi olmadan da sorun teşhis edebilmeni sağlıyor.
+    """
+    if getattr(sys, "frozen", False):
+        base_dir = Path(sys.executable).parent
+    else:
+        base_dir = Path(__file__).resolve().parent
+    log_dir = base_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+    return log_dir / "transcribe_censor_service.log"
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    filename=str(_resolve_log_file_path()),
+    filemode="a",
+    format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
+    encoding="utf-8",
+)
 logger = logging.getLogger("ner-transcribe")
 
 # FastAPI, senkron ("def", "async def" değil) endpoint'leri otomatik olarak
@@ -104,6 +129,33 @@ def _log_gpu_memory(context: str) -> None:
     except Exception as exc:
         logger.debug("nvidia-smi ile VRAM okunamadı (kritik değil): %s", exc)
 
+
+# C# API'sinin adresi -- Python buraya ilerleme bildirimleri POST'lar.
+# Aynı localhost üzerinde çalıştıkları için sabit bir varsayılan yeterli,
+# ama farklı bir port kullanıyorsan ortam değişkeniyle geçersiz kılabilirsin.
+_CSHARP_API_BASE_URL = os.environ.get("CSHARP_API_BASE_URL", "http://127.0.0.1:5169")
+
+
+def _report_progress(job_id: str, percent: int, message: str) -> None:
+    """
+    C#'a "şu an %X'teyim" diye haber verir. TAMAMEN best-effort: bu çağrı
+    başarısız olursa (C# o an ayakta değilse, ağ sorunu vb.) transkripsiyonun
+    kendisini ASLA etkilememeli -- sadece sessizce loglayıp devam ediyoruz.
+    job_id boşsa (ör. Swagger'dan job_id vermeden elle test ediliyorsa) hiç
+    denemiyoruz.
+    """
+    if not job_id:
+        return
+    try:
+        import httpx
+        httpx.post(
+            f"{_CSHARP_API_BASE_URL}/api/Interviews/jobs/{job_id}/progress",
+            json={"percent": percent, "message": message},
+            timeout=2.0,
+        )
+    except Exception as exc:
+        logger.debug("İlerleme bildirimi gönderilemedi (kritik değil): %s", exc)
+
 # --------------------------------------------------------------------------
 # 0) CUDA 12 DLL YOLLARI (Windows + CUDA 13 sistem kurulumu ile uyumluluk için)
 # --------------------------------------------------------------------------
@@ -119,7 +171,7 @@ def _log_gpu_memory(context: str) -> None:
 # NOT: pyannote/torch İÇİN AYRI bir CUDA kurulumuna gerek YOK -- diarization
 # bilerek CPU'da çalıştığından, torch'u CPU-only kurman yeterli (bkz. kurulum
 # talimatları). Bu blok sadece whisper'ın CUDA ihtiyacı için var.
-if sys.platform == "win32":
+if sys.platform == "win32" and os.environ.get("SKIP_CUDA_DLL_PRELOAD") != "1":
     import ctypes
     import site
 
@@ -163,6 +215,13 @@ if sys.platform == "win32":
         # vererek elle yüklüyoruz -- Windows aynı isimli bir DLL zaten
         # belleğe yüklendiğinde sonraki LoadLibrary çağrılarında o kopyayı
         # kullanmaya devam eder.
+        #
+        # NOT: Yeni (torch>=2.8) kurulumlarda bu preload mekanizması torch'un
+        # KENDİ bundled DLL'leriyle çakışıp "WinError 127: specified
+        # procedure could not be found" hatasına yol açabiliyor -- bu
+        # durumda SKIP_CUDA_DLL_PRELOAD=1 ile tamamen atlanabilir (whisper
+        # hâlâ CUDA'yı kullanabiliyor çünkü torch zaten kendi DLL'lerini
+        # doğru yüklüyor).
         _priority_order = ["nvjitlink", "cublaslt", "cublas", "cudnn"]
 
         def _priority(p: Path) -> int:
@@ -190,12 +249,39 @@ if sys.platform == "win32":
 
         logger.info("%d/%d CUDA DLL'i önceden belleğe yüklendi.", _preloaded, len(_all_dlls))
 
-    # --- FFmpeg SHARED DLL'leri (torchcodec/pyannote için) ---
-    # torchcodec, ffmpeg.exe'yi DEĞİL, FFmpeg'in paylaşımlı kütüphane (DLL)
-    # sürümünü arar (avcodec-*.dll, avformat-*.dll vb.). Bunlar normal
-    # "essentials" ffmpeg build'lerinde bulunmaz -- ayrı bir "shared" build
-    # indirip klasörünü burada belirtmen gerekir (kurulum talimatlarına bak).
+# --- FFmpeg SHARED DLL'leri (torchcodec/pyannote için) ---
+# BİLEREK yukarıdaki CUDA preload bloğunun DIŞINDA -- SKIP_CUDA_DLL_PRELOAD=1
+# ayarlansa bile bu blok HER ZAMAN çalışmalı, çünkü torchcodec'in ses
+# decode edebilmesi (dolayısıyla diarization'ın hiç çalışması) buna bağlı,
+# CUDA preload'la hiçbir ilgisi yok.
+# torchcodec, ffmpeg.exe'yi DEĞİL, FFmpeg'in paylaşımlı kütüphane (DLL)
+# sürümünü arar (avcodec-*.dll, avformat-*.dll vb.).
+
+
+def _default_ffmpeg_shared_dir() -> Path:
+    """
+    .exe'nin (paketlenmiş haldeyken) ya da bu .py dosyasının (geliştirme
+    modundayken) bulunduğu klasöre göre, yanına konacak bir 'ffmpeg\\bin'
+    klasörünü otomatik bulur -- taşınabilir dağıtımda kimsenin elle
+    FFMPEG_SHARED_DIR ortam değişkeni ayarlamasına gerek kalmasın diye.
+    Dağıtım klasörünü hazırlarken FFmpeg'in "shared" build'ini bu .exe'nin
+    yanına 'ffmpeg' adında bir klasöre koyman yeterli olacak.
+    """
+    if getattr(sys, "frozen", False):
+        base_dir = Path(sys.executable).parent
+    else:
+        base_dir = Path(__file__).resolve().parent
+    return base_dir / "ffmpeg" / "bin"
+
+
+if sys.platform == "win32":
     _ffmpeg_shared_dir = os.environ.get("FFMPEG_SHARED_DIR")
+    if not _ffmpeg_shared_dir:
+        _auto_dir = _default_ffmpeg_shared_dir()
+        if _auto_dir.is_dir():
+            _ffmpeg_shared_dir = str(_auto_dir)
+            logger.info("FFMPEG_SHARED_DIR ayarlı değil, otomatik bulundu: %s", _ffmpeg_shared_dir)
+
     if _ffmpeg_shared_dir:
         if Path(_ffmpeg_shared_dir).is_dir():
             os.add_dll_directory(_ffmpeg_shared_dir)
@@ -204,6 +290,12 @@ if sys.platform == "win32":
             logger.warning(
                 "FFMPEG_SHARED_DIR ayarlı ama klasör bulunamadı: %s", _ffmpeg_shared_dir
             )
+    else:
+        logger.warning(
+            "FFmpeg shared DLL dizini bulunamadı (ne FFMPEG_SHARED_DIR ayarlı, "
+            "ne de .exe'nin yanında bir 'ffmpeg\\bin' klasörü var) -- "
+            "konuşmacı ayrımı (diarization) ses okurken hata verebilir."
+        )
 
 # --------------------------------------------------------------------------
 # 1) MODEL YÖNETİMİ (uygulama başlarken bir kere yüklenir, her istekte değil)
@@ -237,19 +329,47 @@ def _load_whisper():
 
     # Ortam değişkeniyle değiştirilebilir -- A/B test için kod değiştirmeden
     # "large-v3-turbo" deneyebilirsin (bkz. WHISPER_MODEL ortam değişkeni).
-    # NOT: "large-v3-turbo" ile faster-whisper'ın yeterince güncel bir
-    # sürümü kurulu olmalı (pip install --upgrade faster-whisper), yoksa
-    # model adı tanınmayabilir.
     model_size = os.environ.get("WHISPER_MODEL", "large-v3")
+    download_root = str(Path.home() / ".cache" / "whisper-models")
 
-    model = WhisperModel(
-        model_size_or_path=model_size,
-        device="cuda",
-        compute_type="int8_float16",
-        download_root=str(Path.home() / ".cache" / "whisper-models"),
-    )
-    logger.info("faster-whisper yüklendi (%s, int8_float16, cuda)", model_size)
-    return model
+    # WHISPER_DEVICE ile elle zorlamak istersen ("cuda" ya da "cpu") --
+    # aksi halde önce GPU'yu dener, bulunamazsa/uyumsuzsa OTOMATİK olarak
+    # CPU'ya düşer. Bu, akademisyenin ekran kartsız (ya da uyumsuz sürücülü)
+    # bir bilgisayarında uygulamanın ÇÖKMEK yerine yavaş da olsa çalışmasını
+    # sağlıyor -- taşınabilir dağıtımda kimin bilgisayarında ne olduğunu
+    # bilemeyiz, bu yüzden koda bırakıyoruz.
+    forced_device = os.environ.get("WHISPER_DEVICE")
+    if forced_device in ("cuda", "cpu"):
+        candidates = [(forced_device, "int8_float16" if forced_device == "cuda" else "int8")]
+    else:
+        candidates = [("cuda", "int8_float16"), ("cpu", "int8")]
+
+    last_error: Exception | None = None
+    for device, compute_type in candidates:
+        try:
+            model = WhisperModel(
+                model_size_or_path=model_size,
+                device=device,
+                compute_type=compute_type,
+                download_root=download_root,
+            )
+            logger.info("faster-whisper yüklendi (%s, %s, %s)", model_size, compute_type, device)
+            if device == "cpu" and not forced_device:
+                logger.warning(
+                    "GPU bulunamadı ya da kullanılamadı -- whisper CPU modunda "
+                    "çalışacak. Bu, işlem süresini önemli ölçüde (10-20 kat) "
+                    "uzatabilir ama uygulamanın ekran kartsız bilgisayarlarda da "
+                    "çökmeden çalışmasını sağlıyor."
+                )
+            return model
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Whisper '%s' cihazında yüklenemedi (%s) -- alternatif deneniyor.",
+                device, exc,
+            )
+
+    raise RuntimeError(f"Whisper hiçbir cihazda yüklenemedi (son hata: {last_error})") from last_error
 
 
 def _unload_whisper() -> None:
@@ -324,6 +444,18 @@ def _load_diarization():
     try:
         import torch
         from pyannote.audio import Pipeline
+
+        # TF32 (TensorFloat-32): SADECE GPU modunda açılıyor. RTX 3060 (Ampere
+        # mimarisi) bunu donanımsal destekliyor -- matris çarpımlarını FP32'den
+        # biraz daha düşük hassasiyetle ama belirgin daha hızlı yapar. Bu
+        # GERÇEK bir ödünleşim (yüzde 0 kalite kaybı değil) ama pratikte
+        # diarization sonucunu (kim ne zaman konuştu) neredeyse hiç
+        # etkilemiyor, endüstride yaygın kullanılan bir hızlandırma. Bilerek
+        # sadece GPU modunda ve açıkça yorumla belgeleyerek açıyoruz.
+        if _DIARIZATION_DEVICE == "gpu":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            logger.info("TF32 hızlandırması açıldı (sadece GPU modunda, küçük bir hassasiyet ödünleşimi var).")
 
         # CPU thread sayısını fiziksel çekirdek sayısına açıkça ayarlıyoruz
         # -- PyTorch bazen varsayılan olarak daha düşük bir sayı seçebiliyor.
@@ -401,6 +533,10 @@ app = FastAPI(title="Lokal Deşifre ve Sansürleme Motoru", lifespan=lifespan)
 
 
 class TranscribeRequest(BaseModel):
+    job_id: str = Field(
+        default="",
+        description="C# tarafındaki TranscriptionJob.Id -- ilerleme bildirimlerini bu job'a yazmak için kullanılır.",
+    )
     audio_path: str = Field(..., description="Sunucunun erişebildiği yerel ses dosyası yolu")
     language: str = Field(default="tr")
     censor_labels: list[str] = Field(
@@ -724,6 +860,7 @@ def transcribe(req: TranscribeRequest):
     target_labels = {lbl.upper() for lbl in req.censor_labels}
 
     logger.info("Transkripsiyon başladı: %s", audio_path.name)
+    _report_progress(req.job_id, 5, "Başlatılıyor")
 
     # Kilidi burada, gerçek işlem başlamadan HEMEN önce alıyoruz. Aynı anda
     # başka bir istek işleniyorsa, bu istek burada BEKLER -- kuyruğa
@@ -833,10 +970,20 @@ def transcribe(req: TranscribeRequest):
                     gc.collect()
                     _log_gpu_memory(f"parça {i + 1}/{len(chunk_boundaries)} sonrası")
 
+                # İlerleme: whisper toplam çubuğun %10-%70'ini kaplar (diarization
+                # açıksa, sonrasına yer bırakmak için), kapalıysa %10-%90'ını.
+                whisper_upper_bound = 70 if diarization_enabled else 90
+                whisper_progress = 10 + int((i + 1) / len(chunk_boundaries) * (whisper_upper_bound - 10))
+                _report_progress(
+                    req.job_id, whisper_progress,
+                    f"Parça {i + 1}/{len(chunk_boundaries)} işlendi" if multi_chunk else "Ses işleniyor",
+                )
+
             turns: list[tuple[float, float, str]] = []
             namer = _SpeakerNamer()
 
             if diarization_enabled and _DIARIZATION_DEVICE == "cpu":
+                _report_progress(req.job_id, 75, "Konuşmacı ayrımı tamamlanıyor")
                 logger.info("Whisper bitti, arka plandaki diarization sonucu bekleniyor (varsa)...")
                 wait_start_time = time.perf_counter()
                 try:
@@ -870,27 +1017,40 @@ def transcribe(req: TranscribeRequest):
                 import torch  # DIARIZATION_DEVICE=gpu ise CUDA'lı torch kurulu olmalı
 
                 logger.info("Whisper bitti. Sıralı GPU modu: whisper boşaltılıyor...")
+                _report_progress(req.job_id, 75, "Konuşmacı ayrımı hazırlanıyor (GPU)")
                 _unload_whisper()
 
                 logger.info("Diarization pipeline GPU'ya taşınıyor...")
-                diarization_start_time = time.perf_counter()
+                _transfer_start = time.perf_counter()
                 diarization_pipeline.to(torch.device("cuda"))
+                torch.cuda.synchronize()  # transfer'in GERÇEKTEN bitmesini bekle (asenkron olabilir)
+                _transfer_time = time.perf_counter() - _transfer_start
+                logger.info("[ZAMANLAMA] GPU'ya taşıma: %.2f saniye", _transfer_time)
                 _log_gpu_memory("diarization GPU'ya taşındıktan sonra")
 
                 try:
+                    diarization_start_time = time.perf_counter()
                     turns = _run_diarization(diarization_pipeline, str(audio_path), req)
                     total_diarization_time = time.perf_counter() - diarization_start_time
                     logger.info(
-                        "Speaker diarization (GPU) bitti: %d konuşma turu, %.1f saniye sürdü.",
-                        len(turns), total_diarization_time,
+                        "[ZAMANLAMA] Gerçek diarization hesaplaması: %.2f saniye "
+                        "(bu, transfer HARİÇ, sadece _run_diarization() çağrısı)",
+                        total_diarization_time,
+                    )
+                    logger.info(
+                        "Speaker diarization (GPU) bitti: %d konuşma turu, "
+                        "toplam %.1f saniye (transfer=%.1fs + hesaplama=%.1fs).",
+                        len(turns), _transfer_time + total_diarization_time, _transfer_time, total_diarization_time,
                     )
                 except Exception:
                     logger.exception("GPU diarization başarısız oldu -- konuşmacı etiketi eklenmeyecek.")
                     diarization_enabled = False
                 finally:
+                    _transfer_back_start = time.perf_counter()
                     logger.info("Diarization pipeline CPU'ya geri taşınıyor, VRAM serbest bırakılıyor...")
                     diarization_pipeline.to(torch.device("cpu"))
                     torch.cuda.empty_cache()
+                    logger.info("[ZAMANLAMA] CPU'ya geri taşıma: %.2f saniye", time.perf_counter() - _transfer_back_start)
                     _log_gpu_memory("diarization CPU'ya geri taşındıktan sonra")
 
                     # Bir sonraki isteğin whisper'ı hazır bulması için hemen
@@ -901,6 +1061,8 @@ def transcribe(req: TranscribeRequest):
 
             else:
                 logger.info("Speaker diarization devre dışı, konuşmacı etiketi eklenmeyecek.")
+
+            _report_progress(req.job_id, 92, "Kişisel veriler sansürleniyor")
 
             segments_out: list[Segment] = []
             full_text_parts: list[str] = []
@@ -947,6 +1109,7 @@ def transcribe(req: TranscribeRequest):
                 audio_path.name, req.language, total_audio_duration, len(chunk_boundaries),
                 len(all_entities), diarization_enabled,
             )
+            _report_progress(req.job_id, 99, "SRT hazırlanıyor")
 
             return TranscribeResponse(
                 status="ok",
@@ -979,3 +1142,20 @@ def health():
         "models_loaded": list(_MODELS.keys()),
         "diarization_enabled": _MODELS.get("diarization") is not None,
     }
+
+
+if __name__ == "__main__":
+    # Bu blok, sadece dosya DOĞRUDAN çalıştırıldığında devreye giriyor --
+    # geliştirme sırasında hep "uvicorn transcribe_censor_service:app ..."
+    # komutuyla başlatıyorduk, o zaman uvicorn'un KENDİ CLI'ı sunucuyu
+    # ayağa kaldırıyordu, bu blok hiç çalışmıyordu. Ama PyInstaller ile
+    # paketlenmiş .exe çift tıklandığında (ya da doğrudan çalıştırıldığında)
+    # dışarıda bizi başlatacak bir "uvicorn komutu" YOK -- kendi kendimizi
+    # başlatmamız gerekiyor.
+    import uvicorn
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8500"))
+
+    logger.info("Doğrudan .exe olarak başlatılıyor: %s:%s", host, port)
+    uvicorn.run(app, host=host, port=port, workers=1)

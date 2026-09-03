@@ -1,7 +1,11 @@
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Psikoloji.Application.Interviews.Commands.CancelTranscriptionJob;
+using Psikoloji.Application.Interviews.Commands.DeleteTranscriptionJob;
 using Psikoloji.Application.Interviews.Commands.EnqueueVideoInterviewJob;
+using Psikoloji.Application.Interviews.Commands.UpdateJobProgress;
+using Psikoloji.Application.Interviews.Queries.GetTranscriptionJobs;
 using Psikoloji.Application.Interviews.Queries.GetTranscriptionJobStatus;
 
 namespace Psikoloji.WebAPI.Controllers;
@@ -54,13 +58,34 @@ public sealed class InterviewsController : ControllerBase
             videoFile.FileName, savedVideoPath, diarization);
 
         var jobId = await _sender.Send(
-            new EnqueueVideoInterviewJobCommand(savedVideoPath, language, Diarization: diarization),
+            new EnqueueVideoInterviewJobCommand(
+                savedVideoPath, videoFile.FileName, language, Diarization: diarization),
             cancellationToken);
 
         return AcceptedAtAction(nameof(GetJobStatus), new { id = jobId }, new { jobId });
     }
 
-    /// <summary>Job'un anlık durumunu döner: Pending / Processing / Completed / Failed.</summary>
+    /// <summary>Geçmişteki job'ları sayfalanmış şekilde, en yeniden eskiye listeler.</summary>
+    [HttpGet("jobs")]
+    public async Task<ActionResult<PagedJobsResultDto>> GetJobs(
+        [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken cancellationToken = default)
+    {
+        var result = await _sender.Send(new GetTranscriptionJobsQuery(page, pageSize), cancellationToken);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Bir job'ı ve ona ait video/SRT dosyalarını kalıcı olarak siler.
+    /// Processing durumundaki bir job silinemez -- önce iptal edilmeli.
+    /// </summary>
+    [HttpDelete("jobs/{id:guid}")]
+    public async Task<IActionResult> DeleteJob(Guid id, CancellationToken cancellationToken)
+    {
+        var deleted = await _sender.Send(new DeleteTranscriptionJobCommand(id), cancellationToken);
+        return deleted ? Ok(new { deleted = true }) : Conflict(new { deleted = false });
+    }
+
+    /// <summary>Job'un anlık durumunu döner: Pending / Processing / Completed / Failed / Cancelled.</summary>
     [HttpGet("jobs/{id:guid}")]
     public async Task<ActionResult<TranscriptionJobStatusDto>> GetJobStatus(
         Guid id, CancellationToken cancellationToken)
@@ -70,10 +95,35 @@ public sealed class InterviewsController : ControllerBase
     }
 
     /// <summary>
-    /// Tamamlanmış bir job'un ürettiği .srt dosyasını ham içerik olarak döner.
-    /// UI bunu hem önizleme için fetch edebilir hem de doğrudan indirme linki
-    /// olarak kullanabilir (href + download attribute).
+    /// Devam eden (Pending ya da Processing) bir job'ı iptal eder. Pending
+    /// ise hemen Cancelled işaretlenir. Processing ise gerçek zamanlı bir
+    /// iptal sinyali gönderilir -- C# tarafı beklemeyi hemen bırakır, ama
+    /// Python tarafındaki o an süren GPU/CPU hesaplaması Python'un kendi
+    /// doğası gereği anında kesilemez, arka planda sessizce bitene kadar
+    /// devam edebilir (bilinen bir sınır).
     /// </summary>
+    [HttpPost("jobs/{id:guid}/cancel")]
+    public async Task<IActionResult> CancelJob(Guid id, CancellationToken cancellationToken)
+    {
+        var cancelled = await _sender.Send(new CancelTranscriptionJobCommand(id), cancellationToken);
+        return cancelled ? Ok(new { cancelled = true }) : Conflict(new { cancelled = false });
+    }
+
+    /// <summary>
+    /// SADECE Python AI motoru tarafından çağrılır (localhost içi) --
+    /// whisper parça parça ilerledikçe gerçek zamanlı ilerleme bildirir.
+    /// UI'ın 3 saniyelik polling'i bu sayede gerçek bir yüzde gösterebiliyor.
+    /// </summary>
+    [HttpPost("jobs/{id:guid}/progress")]
+    public async Task<IActionResult> ReportProgress(
+        Guid id, [FromBody] ReportProgressRequest request, CancellationToken cancellationToken)
+    {
+        await _sender.Send(new UpdateJobProgressCommand(id, request.Percent, request.Message), cancellationToken);
+        return Ok();
+    }
+
+    /// <summary>
+    /// Tamamlanmış bir job'un ürettiği .srt dosyasını ham içerik olarak döner.</summary>
     [HttpGet("jobs/{id:guid}/srt")]
     public async Task<IActionResult> GetJobSrt(Guid id, CancellationToken cancellationToken)
     {
@@ -89,4 +139,6 @@ public sealed class InterviewsController : ControllerBase
         return File(bytes, "text/plain; charset=utf-8", fileName);
     }
 }
+
+public sealed record ReportProgressRequest(int Percent, string? Message);
 

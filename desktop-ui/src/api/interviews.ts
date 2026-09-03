@@ -1,6 +1,7 @@
-import type { TranscriptionJobStatus } from "../types/job";
+import type { PagedJobsResult, TranscriptionJobStatus } from "../types/job";
+import { apiFetch } from "../utils/apiFetch";
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:5000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:5169";
 
 export async function uploadInterviewVideo(
   file: File,
@@ -14,7 +15,7 @@ export async function uploadInterviewVideo(
   formData.append("language", language);
   formData.append("diarization", String(diarization));
 
-  const response = await fetch(`${API_BASE_URL}/api/Interviews/process`, {
+  const response = await apiFetch(`${API_BASE_URL}/api/Interviews/process`, {
     method: "POST",
     body: formData,
   });
@@ -28,7 +29,7 @@ export async function uploadInterviewVideo(
 }
 
 export async function getJobStatus(jobId: string): Promise<TranscriptionJobStatus> {
-  const response = await fetch(`${API_BASE_URL}/api/Interviews/jobs/${jobId}`);
+  const response = await apiFetch(`${API_BASE_URL}/api/Interviews/jobs/${jobId}`);
 
   if (response.status === 404) {
     throw new Error("Job bulunamadı.");
@@ -42,4 +43,41 @@ export async function getJobStatus(jobId: string): Promise<TranscriptionJobStatu
 
 export function getJobSrtDownloadUrl(jobId: string): string {
   return `${API_BASE_URL}/api/Interviews/jobs/${jobId}/srt`;
+}
+
+export async function cancelJob(jobId: string): Promise<void> {
+  const response = await apiFetch(`${API_BASE_URL}/api/Interviews/jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+
+  // 409: job zaten bitmiş bir durumdaydı (Completed/Failed/Cancelled) --
+  // bu bir hata değil, polling zaten bir sonraki tick'te doğru durumu
+  // gösterecek, o yüzden burada fırlatmıyoruz.
+  if (!response.ok && response.status !== 409) {
+    const text = await response.text();
+    throw new Error(`İptal edilemedi (${response.status}): ${text || response.statusText}`);
+  }
+}
+
+export async function listJobs(page = 1, pageSize = 20): Promise<PagedJobsResult> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/api/Interviews/jobs?page=${page}&pageSize=${pageSize}`,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Geçmiş listesi alınamadı (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function deleteJob(jobId: string): Promise<void> {
+  const response = await apiFetch(`${API_BASE_URL}/api/Interviews/jobs/${jobId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Silinemedi (${response.status}): ${text || response.statusText}`);
+  }
 }

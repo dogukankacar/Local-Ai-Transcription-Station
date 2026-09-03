@@ -1,4 +1,3 @@
-using Hangfire;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -9,32 +8,34 @@ using Psikoloji.Domain.Enums;
 namespace Psikoloji.Infrastructure.BackgroundJobs;
 
 /// <summary>
-/// Hangfire tarafından çağrılan job runner. Scoped kayıtlı -- Hangfire,
-/// her job çalıştırmasında ASP.NET Core DI'dan otomatik yeni bir scope
-/// açar (AddHangfire ile birlikte gelen davranış), bu yüzden burada elle
-/// IServiceScopeFactory ile uğraşmaya gerek yok (önceki BackgroundService
-/// tabanlı çözümde olduğu gibi).
+/// TranscriptionJobProcessingService (BackgroundService) tarafından
+/// çağrılan job runner. Scoped kayıtlı -- her job için yeni bir DI scope
+/// içinde çalıştırılıyor.
 ///
-/// AutomaticRetry KAPALI (Attempts = 0): Şu an parçalı işleme (chunking)
-/// var ama İLERLEME KAYDI (checkpoint/resume) YOK -- yani bir hata
-/// olduğunda otomatik retry, işi kaldığı parçadan değil BAŞTAN başlatır.
-/// Uzun (1-2 saatlik) bir kayıtta bu, "sonsuz döngü" gibi hissettiren ama
-/// aslında her denemede saatler kaybettiren bir davranışa yol açıyordu.
-/// Checkpoint/resume eklenene kadar retry'ı kapalı tutup, hatanın
-/// dashboard'da net bir "Failed" olarak görünmesini ve kullanıcının BİLEREK
-/// yeniden denemesini tercih ediyoruz.
+/// İPTAL: gerçek zamanlı iptal için IJobCancellationRegistry kullanıyoruz
+/// -- kendi token'ımızı üretip mediator'a onu veriyoruz (parametre olarak
+/// gelen cancellationToken sadece uygulama kapanışını haber verir).
+///
+/// Otomatik retry YOK: checkpoint/resume olmadan otomatik retry, işi
+/// baştan başlatıp saatler kaybettiriyordu -- bir hata olduğunda job
+/// sadece "Failed" olarak işaretlenir, kullanıcı bilerek tekrar dener.
 /// </summary>
-[AutomaticRetry(Attempts = 0)]
 public sealed class TranscriptionJobRunner : ITranscriptionJobRunner
 {
     private readonly IApplicationDbContext _db;
     private readonly ISender _mediator;
+    private readonly IJobCancellationRegistry _cancellationRegistry;
     private readonly ILogger<TranscriptionJobRunner> _logger;
 
-    public TranscriptionJobRunner(IApplicationDbContext db, ISender mediator, ILogger<TranscriptionJobRunner> logger)
+    public TranscriptionJobRunner(
+        IApplicationDbContext db,
+        ISender mediator,
+        IJobCancellationRegistry cancellationRegistry,
+        ILogger<TranscriptionJobRunner> logger)
     {
         _db = db;
         _mediator = mediator;
+        _cancellationRegistry = cancellationRegistry;
         _logger = logger;
     }
 
@@ -43,24 +44,38 @@ public sealed class TranscriptionJobRunner : ITranscriptionJobRunner
         var job = await _db.TranscriptionJobs.FirstOrDefaultAsync(j => j.Id == jobId, cancellationToken);
         if (job is null)
         {
-            _logger.LogWarning("Hangfire job DB'de bulunamadı: {JobId}", jobId);
+            _logger.LogWarning("Kuyruktan gelen job DB'de bulunamadı: {JobId}", jobId);
+            return;
+        }
+
+        // Güvenlik ağı: kullanıcı, job henüz kuyruktan alınmadan (Pending
+        // durumdayken) iptal etmiş olabilir -- bu durumda
+        // CancelTranscriptionJobCommandHandler durumu zaten Cancelled
+        // yapmıştır, burada hiç işlemeye başlamadan çıkıyoruz.
+        if (job.Status == JobStatus.Cancelled)
+        {
+            _logger.LogInformation("Job başlamadan önce iptal edilmiş, atlanıyor: {JobId}", job.Id);
             return;
         }
 
         job.Status = JobStatus.Processing;
         job.StartedAtUtc = DateTime.UtcNow;
-        job.ErrorMessage = null; // önceki bir retry'dan kalan hata mesajını temizle
+        job.ErrorMessage = null; // önceki bir denemeden kalan hata mesajını temizle
         await _db.SaveChangesAsync(cancellationToken);
 
-        _logger.LogInformation("Job işleniyor (Hangfire): {JobId} ({Video})", job.Id, job.VideoFilePath);
+        _logger.LogInformation("Job işleniyor: {JobId} ({Video})", job.Id, job.VideoFilePath);
+
+        // Bu job için GERÇEK bir iptal token'ı kaydediyoruz -- kullanıcı
+        // "İptal Et" butonuna basınca bu token sinyal alacak.
+        var realCancellationToken = _cancellationRegistry.Register(jobId);
 
         try
         {
             // FFmpeg -> Python AI motoru (whisper + diarization + NER) -> SRT ->
             // cleanup zaten ProcessVideoInterviewCommandHandler içinde yapılıyor.
             var result = await _mediator.Send(
-                new ProcessVideoInterviewCommand(job.VideoFilePath, job.Language, job.CensorLabels, job.Diarization),
-                cancellationToken);
+                new ProcessVideoInterviewCommand(job.Id, job.VideoFilePath, job.Language, job.CensorLabels, job.Diarization),
+                realCancellationToken);
 
             job.Status = JobStatus.Completed;
             job.SrtFilePath = result.SrtFilePath;
@@ -72,18 +87,26 @@ public sealed class TranscriptionJobRunner : ITranscriptionJobRunner
 
             _logger.LogInformation("Job tamamlandı: {JobId}", job.Id);
         }
+        catch (OperationCanceledException)
+        {
+            // Kullanıcı bilerek iptal etti -- bu bir hata değil, Failed
+            // olarak değil Cancelled olarak işaretliyoruz.
+            _logger.LogInformation("Job kullanıcı tarafından iptal edildi: {JobId}", job.Id);
+            job.Status = JobStatus.Cancelled;
+            job.CompletedAtUtc = DateTime.UtcNow;
+            await _db.SaveChangesAsync(CancellationToken.None); // ana token iptal olmuş olabilir, temiz bir token kullan
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Job işlenirken hata oluştu: {JobId}", job.Id);
             job.Status = JobStatus.Failed;
             job.ErrorMessage = ex.Message;
             job.CompletedAtUtc = DateTime.UtcNow;
-            await _db.SaveChangesAsync(cancellationToken);
-
-            // Tekrar fırlatıyoruz ki Hangfire bunu bir "başarısız deneme"
-            // olarak görsün -- hem [AutomaticRetry] devreye girsin hem de
-            // dashboard'da kırmızı/failed olarak işaretlensin.
-            throw;
+            await _db.SaveChangesAsync(CancellationToken.None);
+        }
+        finally
+        {
+            _cancellationRegistry.Unregister(jobId);
         }
     }
 }

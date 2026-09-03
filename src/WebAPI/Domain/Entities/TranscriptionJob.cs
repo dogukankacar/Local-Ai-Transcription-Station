@@ -7,6 +7,12 @@ public sealed class TranscriptionJob
     public Guid Id { get; init; } = Guid.NewGuid();
 
     public string VideoFilePath { get; init; } = string.Empty;
+
+    /// <summary>Kullanıcının bilgisayarındaki orijinal dosya adı (ör.
+    /// "Ahmet ile görüşme.mp4") -- geçmiş listesinde tanıma kolaylığı için.
+    /// Diskte tuttuğumuz dosya adı (GUID) değil, sadece görüntüleme amaçlı.</summary>
+    public string? OriginalFileName { get; init; }
+
     public string Language { get; init; } = "tr";
     public string CensorLabelsCsv { get; init; } = "PER,LOC";
 
@@ -33,6 +39,13 @@ public sealed class TranscriptionJob
 
     public string? ErrorMessage { get; set; }
     public double? AudioDurationSeconds { get; set; }
+
+    /// <summary>0-100 arası, Python'dan gerçek zamanlı gelen ilerleme yüzdesi.
+    /// Job Pending/Completed/Failed/Cancelled iken null olabilir.</summary>
+    public int? ProgressPercent { get; set; }
+
+    /// <summary>İnsan-okunur kısa ilerleme açıklaması, ör. "Parça 3/7 işleniyor".</summary>
+    public string? ProgressMessage { get; set; }
 
     public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;
     public DateTime? StartedAtUtc { get; set; }

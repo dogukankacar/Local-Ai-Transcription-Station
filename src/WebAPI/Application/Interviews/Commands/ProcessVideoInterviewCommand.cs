@@ -7,6 +7,7 @@ namespace Psikoloji.Application.Interviews.Commands.ProcessVideoInterview;
 /// transkripsiyon/sansürleme -> sansürlü SRT üretimi.
 /// </summary>
 public sealed record ProcessVideoInterviewCommand(
+    Guid JobId,
     string VideoFilePath,
     string Language = "tr",
     IReadOnlyCollection<string>? CensorLabels = null,

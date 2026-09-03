@@ -13,6 +13,8 @@ public sealed record TranscriptionJobStatusDto(
     string? FullTextCensored,
     string? ErrorMessage,
     double? AudioDurationSeconds,
+    int? ProgressPercent,
+    string? ProgressMessage,
     DateTime CreatedAtUtc,
     DateTime? StartedAtUtc,
     DateTime? CompletedAtUtc);

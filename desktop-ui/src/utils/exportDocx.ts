@@ -1,9 +1,9 @@
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
+import { saveFile } from "./saveFile";
 
 /**
- * Düz metni bir Word (.docx) dosyasına çevirir ve tarayıcıda indirme
- * işlemini başlatır. Tamamen tarayıcı tarafında çalışır -- backend'e
- * ek bir istek gitmez, dosya hiç sunucudan geçmez.
+ * Düz metni bir Word (.docx) dosyasına çevirir ve kaydeder. Tamamen
+ * tarayıcı/Tauri tarafında çalışır -- backend'e ek bir istek gitmez.
  */
 export async function downloadTextAsDocx(
   filename: string,
@@ -34,14 +34,5 @@ export async function downloadTextAsDocx(
   });
 
   const blob = await Packer.toBlob(doc);
-  const url = URL.createObjectURL(blob);
-
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename.endsWith(".docx") ? filename : `${filename}.docx`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-
-  URL.revokeObjectURL(url);
+  await saveFile(filename.endsWith(".docx") ? filename : `${filename}.docx`, blob);
 }

@@ -10,6 +10,7 @@ public interface ITranscriptionEngineClient
     /// worker'ı) buna göre timeout ayarlamalı ve UI thread'ini bloklamamalı.
     /// </summary>
     Task<TranscriptionResult> TranscribeAsync(
+        Guid jobId,
         string audioFilePath,
         string language,
         IReadOnlyCollection<string> censorLabels,

@@ -45,6 +45,7 @@ public sealed class ProcessVideoInterviewCommandHandler
         {
             // 2) Ses -> Transkript + Sansür (Python AI motoru)
             var transcription = await _transcriptionEngineClient.TranscribeAsync(
+                request.JobId,
                 audioResult.AudioFilePath,
                 request.Language,
                 censorLabels,

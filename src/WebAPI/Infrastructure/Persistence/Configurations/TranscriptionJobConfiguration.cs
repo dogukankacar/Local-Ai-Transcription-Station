@@ -14,6 +14,7 @@ public sealed class TranscriptionJobConfiguration : IEntityTypeConfiguration<Tra
         builder.HasKey(j => j.Id);
 
         builder.Property(j => j.VideoFilePath).IsRequired().HasMaxLength(1024);
+        builder.Property(j => j.OriginalFileName).HasMaxLength(260); // Windows MAX_PATH sınırı
         builder.Property(j => j.Language).IsRequired().HasMaxLength(10);
         builder.Property(j => j.CensorLabelsCsv).IsRequired().HasMaxLength(200);
 
@@ -24,9 +25,10 @@ public sealed class TranscriptionJobConfiguration : IEntityTypeConfiguration<Tra
 
         builder.Property(j => j.SrtFilePath).HasMaxLength(1024);
         builder.Property(j => j.Diarization).IsRequired();
-        builder.Property(j => j.FullTextCensored).HasColumnType("text");
-        builder.Property(j => j.FullText).HasColumnType("text");
-        builder.Property(j => j.ErrorMessage).HasColumnType("text");
+        builder.Property(j => j.FullTextCensored);
+        builder.Property(j => j.FullText);
+        builder.Property(j => j.ErrorMessage);
+        builder.Property(j => j.ProgressMessage).HasMaxLength(200);
 
         builder.Ignore(j => j.CensorLabels); // hesaplanan alan, DB'de kolon değil
 

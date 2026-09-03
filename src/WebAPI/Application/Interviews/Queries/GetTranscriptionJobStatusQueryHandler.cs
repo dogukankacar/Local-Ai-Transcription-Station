@@ -29,6 +29,8 @@ public sealed class GetTranscriptionJobStatusQueryHandler
             job.FullTextCensored,
             job.ErrorMessage,
             job.AudioDurationSeconds,
+            job.ProgressPercent,
+            job.ProgressMessage,
             job.CreatedAtUtc,
             job.StartedAtUtc,
             job.CompletedAtUtc);

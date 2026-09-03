@@ -1,6 +1,6 @@
 import type { JobStatus } from "../types/job";
 
-type StampState = "upcoming" | "active" | "done" | "failed";
+type StampState = "upcoming" | "active" | "done" | "failed" | "cancelled";
 
 const STAGES = [
   { label: "KUYRUKTA" },
@@ -13,6 +13,7 @@ function computeStates(status: JobStatus | null): StampState[] {
   if (status === "Pending") return ["active", "upcoming", "upcoming"];
   if (status === "Processing") return ["done", "active", "upcoming"];
   if (status === "Completed") return ["done", "done", "done"];
+  if (status === "Cancelled") return ["done", "done", "cancelled"];
   // Backend her zaman Processing'e girdikten sonra Failed'e geçer.
   return ["done", "done", "failed"];
 }
@@ -22,6 +23,7 @@ const STATE_STYLES: Record<StampState, string> = {
   active: "border-stamp-pending text-stamp-pending animate-pulse-slow",
   done: "border-stamp-completed text-stamp-completed animate-stamp-in",
   failed: "border-stamp-failed text-stamp-failed animate-stamp-in",
+  cancelled: "border-paper-muted text-paper-muted animate-stamp-in",
 };
 
 interface Props {
@@ -41,10 +43,10 @@ export function StageStamps({ status, errorMessage }: Props) {
               <div
                 className={`flex h-16 w-16 -rotate-3 items-center justify-center rounded-full border-[3px] font-stamp text-[10px] font-bold uppercase leading-tight ${STATE_STYLES[states[i]]}`}
               >
-                {states[i] === "failed" ? "HATA" : stage.label.slice(0, 4)}
+                {states[i] === "failed" ? "HATA" : states[i] === "cancelled" ? "İPTAL" : stage.label.slice(0, 4)}
               </div>
               <span className="font-stamp text-[10px] uppercase tracking-[0.15em] text-paper-muted">
-                {states[i] === "failed" ? "HATA" : stage.label}
+                {states[i] === "failed" ? "HATA" : states[i] === "cancelled" ? "İPTAL EDİLDİ" : stage.label}
               </span>
             </div>
             {i < STAGES.length - 1 && (
