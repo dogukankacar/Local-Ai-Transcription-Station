@@ -1,6 +1,0 @@
-D:\psikoloji\src\WebAPI\publish\appsettings.Development.json
-D:\psikoloji\src\WebAPI\publish\appsettings.json
-D:\psikoloji\src\WebAPI\publish\WebAPI.pdb
-D:\psikoloji\src\WebAPI\publish\aspnetcorev2_inprocess.dll
-D:\psikoloji\src\WebAPI\publish\e_sqlite3.dll
-D:\psikoloji\src\WebAPI\publish\WebAPI.exe
